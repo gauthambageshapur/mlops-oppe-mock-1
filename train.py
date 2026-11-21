@@ -23,8 +23,8 @@ mlflow.set_experiment("iris-oppe1-mock")
 
 
 # start with ONE config; expanded in Step 3
-GRID = {"n_estimators": [100], "max_depth": [None]}
-
+# GRID = {"n_estimators": [100], "max_depth": [None]}
+GRID = {"n_estimators": [50, 100, 200], "max_depth": [3, 5, None]}
 
 
 def dvc_pull(path):
