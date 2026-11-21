@@ -1,0 +1,10 @@
+{
+  "run_id": "b938bb934da44a9eb3761f663c736809",
+  "iteration": 1,
+  "n_estimators": 50,
+  "max_depth": 3,
+  "accuracy": 0.9523809523809523,
+  "precision_macro": 0.9583333333333334,
+  "recall_macro": 0.9444444444444445,
+  "f1_macro": 0.9474747474747476
+}
