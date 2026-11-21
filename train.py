@@ -1,11 +1,15 @@
 import json
 import os
 import subprocess
-
+import mlflow
+import mlflow.sklearn
+import itertools
+import joblib
 
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import (accuracy_score, classification_report, f1_score,
+                             precision_score, recall_score)
 from sklearn.model_selection import train_test_split
 
 
@@ -14,7 +18,12 @@ FEATURES = ["sepal_length", "sepal_width", "petal_length", "petal_width"]
 SPECIES_COL = "species"
 LABELS = {"setosa": 0, "versicolor": 1, "virginica": 2}
 SEED = 42
+mlflow.set_tracking_uri("sqlite:///mlflow.db")
+mlflow.set_experiment("iris-oppe1-mock")
 
+
+# start with ONE config; expanded in Step 3
+GRID = {"n_estimators": [100], "max_depth": [None]}
 
 
 
@@ -96,3 +105,93 @@ if __name__ == "__main__":
     os.makedirs("results", exist_ok=True)
     with open("results/metrics.json", "w") as fh:
         json.dump({"iteration_1_accuracy": a1, "iteration_2_accuracy": a2}, fh, indent=2)
+def split(df):
+    df = prepare(df)
+    X, y = df[FEATURES], df["target"]
+    return train_test_split(X, y, test_size=0.2, stratify=y, random_state=SEED)
+
+
+
+
+def tune(iteration, df, data_files, save_split=None):
+    """One MLflow run per hyperparameter trial."""
+    Xtr, Xva, ytr, yva = split(df)
+    if save_split:
+        out = Xva.copy()
+        out["target"] = yva
+        out.to_csv(save_split, index=False)
+
+
+    results = []
+    for n, d in itertools.product(GRID["n_estimators"], GRID["max_depth"]):
+        with mlflow.start_run(run_name=f"it{iteration}_n{n}_d{d}") as run:
+            model = RandomForestClassifier(
+                n_estimators=n, max_depth=d, random_state=SEED
+            ).fit(Xtr, ytr)
+            pred = model.predict(Xva)
+            m = {
+                "accuracy": accuracy_score(yva, pred),
+                "precision_macro": precision_score(yva, pred, average="macro"),
+                "recall_macro": recall_score(yva, pred, average="macro"),
+                "f1_macro": f1_score(yva, pred, average="macro"),
+            }
+            mlflow.log_params({
+                "n_estimators": n, "max_depth": d, "iteration": iteration,
+                "data_files": ",".join(data_files),
+                "train_rows": len(Xtr), "val_rows": len(Xva),
+            })
+            mlflow.set_tag("iteration", str(iteration))
+            mlflow.log_metrics(m)
+            mlflow.log_text(classification_report(yva, pred), "classification_report.txt")
+            for f in data_files:                      # data version lineage
+                mlflow.log_artifact(f + ".dvc", artifact_path="data_version")
+            mlflow.sklearn.log_model(model, name="model", skops_trusted_types=["sklearn.tree._tree.Tree"])
+            print(f"it{iteration} n={n} depth={d} acc={m['accuracy']:.4f}")
+            results.append({"run_id": run.info.run_id, "iteration": iteration,
+                            "n_estimators": n, "max_depth": d, **m, "model": model})
+    return results
+
+
+
+
+if __name__ == "__main__":
+    v0, v1 = load(V0), load(V1)
+    r1 = tune(1, v0, [V0])
+    r2 = tune(2, pd.concat([v0, v1], ignore_index=True), [V0, V1],
+              save_split="data/test.csv")
+    allr = r1 + r2
+
+
+    best = max(allr, key=lambda r: (r["accuracy"], r["iteration"]))
+    rows = [{k: v for k, v in r.items() if k != "model"} for r in allr]
+    summary = pd.DataFrame(rows).sort_values(["accuracy", "iteration"], ascending=False)
+
+
+    os.makedirs("results", exist_ok=True)
+    os.makedirs("models", exist_ok=True)
+    summary.to_csv("results/runs_summary.csv", index=False)
+    joblib.dump(best["model"], "models/model.joblib")
+
+
+    best_info = {k: v for k, v in best.items() if k != "model"}
+    with open("results/best_model.json", "w") as fh:
+        json.dump(best_info, fh, indent=2, default=str)
+    with open("results/metrics.json", "w") as fh:
+        json.dump({
+            "iteration_1_best_accuracy": max(r["accuracy"] for r in r1),
+            "iteration_2_best_accuracy": max(r["accuracy"] for r in r2),
+            "overall_best": best_info,
+        }, fh, indent=2, default=str)
+
+
+    # a final run that records the chosen model
+    with mlflow.start_run(run_name="best_model"):
+        mlflow.set_tag("role", "best")
+        mlflow.log_params({k: best_info[k] for k in ("iteration", "n_estimators", "max_depth")})
+        mlflow.log_metrics({k: best_info[k] for k in
+                            ("accuracy", "precision_macro", "recall_macro", "f1_macro")})
+        mlflow.log_artifact("models/model.joblib")
+
+
+    print("\n", summary.to_string(index=False))
+    print("\nBEST:", best_info)
